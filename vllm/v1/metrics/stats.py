@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.logger import logger
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -395,6 +396,36 @@ class IterationStats:
         # Process the batch-level "new tokens" engine core event
         if is_prefilling:
             req_stats.first_token_ts = engine_core_timestamp
+            # TTFT breakdown: log once at the first-token step.
+            # is_prefilling is True only for the output that carries the
+            # request's first token, so this fires exactly once per request.
+            breakdown_sum = (
+                output.hash_and_local_cache_time
+                + output.external_lookup_time
+                + output.allocate_slots_time
+                + output.schedule_overhead_time
+                + output.load_kv_time
+                + output.forward_time
+                + output.save_kv_time
+                + output.update_time
+            )
+            logger.info(
+                "[TTFT][BREAKDOWN] req=%s ttft=%.6f "
+                "hash=%.6f ext_lookup=%.6f alloc=%.6f overhead=%.6f "
+                "load_kv=%.6f forward=%.6f save_kv=%.6f update=%.6f "
+                "residual=%.6f",
+                output.request_id,
+                req_stats.first_token_latency,
+                output.hash_and_local_cache_time,
+                output.external_lookup_time,
+                output.allocate_slots_time,
+                output.schedule_overhead_time,
+                output.load_kv_time,
+                output.forward_time,
+                output.save_kv_time,
+                output.update_time,
+                req_stats.first_token_latency - breakdown_sum,
+            )
         else:
             itl = engine_core_timestamp - req_stats.last_token_ts
             self.inter_token_latencies_iter.append(itl)

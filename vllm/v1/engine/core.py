@@ -465,11 +465,70 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        _t_update_start = time.perf_counter()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        _update_time = time.perf_counter() - _t_update_start
+        self._attach_ttft_breakdown(scheduler_output, model_output, engine_core_outputs, _update_time)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _attach_ttft_breakdown(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_output: ModelRunnerOutput | None,
+        engine_core_outputs: dict[int, EngineCoreOutputs] | None,
+        update_time: float,
+    ) -> None:
+        # Attach TTFT breakdown timings to each EngineCoreOutput.
+        _num_total = scheduler_output.num_total_scheduled_reqs
+        _update_per_req = update_time / _num_total if _num_total > 0 else 0.0
+        _worker_load = 0.0
+        _worker_forward = 0.0
+        _worker_save = 0.0
+        # Read from ModelRunnerOutput top-level fields (survive serialization).
+        # Nested KVConnectorOutput fields may be dropped during Worker→EngineCore
+        # msgspec serialization, so we rely on the top-level copies instead.
+        if model_output is not None:
+            _worker_load = model_output.worker_load_kv_time
+            _worker_forward = model_output.worker_forward_time
+            _worker_save = model_output.worker_save_kv_time
+            # Fallback: if top-level is 0, try nested KVConnectorOutput.
+            if _worker_forward == 0.0 and model_output.kv_connector_output is not None:
+                _kv = model_output.kv_connector_output
+                _worker_load = _kv.worker_load_kv_time
+                _worker_forward = _kv.worker_forward_time
+                _worker_save = _kv.worker_save_kv_time
+
+        logger.info(
+            "[TTFT_DEBUG][EngineCore] load=%.6f forward=%.6f save=%.6f "
+            "sched_hash=%.6f sched_ext=%.6f sched_alloc=%.6f sched_overhead=%.6f "
+            "num_new=%d num_total=%d update=%.6f",
+            _worker_load, _worker_forward, _worker_save,
+            scheduler_output.schedule_hash_time,
+            scheduler_output.schedule_external_lookup_time,
+            scheduler_output.schedule_allocate_slots_time,
+            scheduler_output.schedule_overhead_time,
+            scheduler_output.num_scheduled_new_reqs,
+            scheduler_output.num_total_scheduled_reqs,
+            _update_per_req,
+        )
+
+        _num_attached = 0
+        for _outputs in engine_core_outputs.values() if engine_core_outputs else []:
+            for _eco in _outputs.outputs:
+                # The other 7 fields carry per-request accumulated totals
+                # set by Scheduler.update_from_output; only update_time is
+                # per-step and attached here.
+                _eco.update_time = _update_per_req
+                _num_attached += 1
+
+        if _num_attached > 0:
+            logger.info(
+                "[TTFT_DEBUG][EngineCore] attached timing to %d EngineCoreOutputs",
+                _num_attached,
+            )
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -567,9 +626,12 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        _t_update_start = time.perf_counter()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        _update_time = time.perf_counter() - _t_update_start
+        self._attach_ttft_breakdown(scheduler_output, model_output, engine_core_outputs, _update_time)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is

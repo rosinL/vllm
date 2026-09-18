@@ -163,6 +163,19 @@ class Request:
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
 
+        # TTFT breakdown: per-request accumulated step timings (seconds).
+        # Accumulated in Scheduler.update_from_output while the request is
+        # still prefilling (before its first output token), so that chunked
+        # prefill totals across steps are captured on the final chunk's
+        # EngineCoreOutput.
+        self.ttft_hash_and_local_cache_time = 0.0
+        self.ttft_external_lookup_time = 0.0
+        self.ttft_allocate_slots_time = 0.0
+        self.ttft_schedule_overhead_time = 0.0
+        self.ttft_load_kv_time = 0.0
+        self.ttft_forward_time = 0.0
+        self.ttft_save_kv_time = 0.0
+
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0

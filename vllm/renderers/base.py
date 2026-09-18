@@ -942,8 +942,16 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_cmpl_tok_params
 
+        _t_render_start = time.perf_counter()
         dict_prompts = self.render_prompts(prompts)
+        _t_tok_start = time.perf_counter()
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
+        logger.info(
+            "[TTFT_DEBUG][Tokenizer] render=%.6f tokenize=%.6f n=%d",
+            _t_tok_start - _t_render_start,
+            time.perf_counter() - _t_tok_start,
+            len(tok_prompts),
+        )
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
@@ -965,8 +973,16 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_cmpl_tok_params
 
+        _t_render_start = time.perf_counter()
         dict_prompts = await self.render_prompts_async(prompts)
+        _t_tok_start = time.perf_counter()
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
+        logger.info(
+            "[TTFT_DEBUG][Tokenizer] render=%.6f tokenize=%.6f n=%d",
+            _t_tok_start - _t_render_start,
+            time.perf_counter() - _t_tok_start,
+            len(tok_prompts),
+        )
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
@@ -993,6 +1009,7 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
+        _t_render_start = time.perf_counter()
         rendered = [
             self.render_messages(conversation, chat_params)
             for conversation in conversations
@@ -1004,7 +1021,14 @@ class BaseRenderer(ABC, Generic[_T]):
             out_conversations.append(conv)
             dict_prompts.append(prompt)
 
+        _t_tok_start = time.perf_counter()
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
+        logger.info(
+            "[TTFT_DEBUG][Tokenizer] render=%.6f tokenize=%.6f n=%d",
+            _t_tok_start - _t_render_start,
+            time.perf_counter() - _t_tok_start,
+            len(tok_prompts),
+        )
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
@@ -1029,6 +1053,7 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
+        _t_render_start = time.perf_counter()
         rendered = [
             self.render_messages_async(conversation, chat_params)
             for conversation in conversations
@@ -1040,7 +1065,14 @@ class BaseRenderer(ABC, Generic[_T]):
             out_conversations.append(conv)
             dict_prompts.append(prompt)
 
+        _t_tok_start = time.perf_counter()
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
+        logger.info(
+            "[TTFT_DEBUG][Tokenizer] render=%.6f tokenize=%.6f n=%d",
+            _t_tok_start - _t_render_start,
+            time.perf_counter() - _t_tok_start,
+            len(tok_prompts),
+        )
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 

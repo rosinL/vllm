@@ -4557,8 +4557,9 @@ class GPUModelRunner(
         # Finalize KV connector (wait_for_save + clear metadata) after
         # draft model runs. Deferred from target model forward to allow
         # draft model to also save its KV cache.
+        deferred_save_time = 0.0
         if spec_config is not None:
-            self.finalize_kv_connector()
+            deferred_save_time = self.finalize_kv_connector()
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
@@ -4566,6 +4567,17 @@ class GPUModelRunner(
         # self.kv_connector_output may be modified during drafting
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
+
+        # TTFT breakdown: fill in deferred save time (MTP/spec decode path).
+        # The context manager marked it as -1.0 sentinel when defer_finalize
+        # was True; replace it with the actual time from finalize_kv_connector.
+        if kv_connector_output is not None and kv_connector_output.worker_save_kv_time < 0:
+            kv_connector_output.worker_save_kv_time = deferred_save_time
+
+        # TTFT breakdown: copy timing to ModelRunnerOutput top-level fields.
+        _mro_load = kv_connector_output.worker_load_kv_time if kv_connector_output else 0.0
+        _mro_forward = kv_connector_output.worker_forward_time if kv_connector_output else 0.0
+        _mro_save = kv_connector_output.worker_save_kv_time if kv_connector_output else 0.0
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             output = ModelRunnerOutput(
@@ -4581,6 +4593,9 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                worker_load_kv_time=_mro_load,
+                worker_forward_time=_mro_forward,
+                worker_save_kv_time=_mro_save,
             )
 
         if not self.use_async_scheduling:
