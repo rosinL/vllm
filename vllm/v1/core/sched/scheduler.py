@@ -596,6 +596,13 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        import time as _time_mod
+        _step_hash_time = 0.0
+        _step_external_lookup_time = 0.0
+        _step_allocate_slots_time = 0.0
+        _num_scheduled_new_reqs = 0
+        _num_total_scheduled_reqs = 0
+
         self.kv_cache_manager.new_step_starts()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
@@ -914,12 +921,14 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
+                    _t_hash = _time_mod.perf_counter()
                     (
                         new_computed_blocks,
                         num_new_local_computed_tokens,
                         request.shared_prefix_boundary,
                         hit_diverged,
                     ) = self._get_local_prefix_cache_hit(request)
+                    _step_hash_time += _time_mod.perf_counter() - _t_hash
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -930,11 +939,13 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
+                        _t_ext = _time_mod.perf_counter()
                         ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, block_aligned_local
                             )
                         )
+                        _step_external_lookup_time += _time_mod.perf_counter() - _t_ext
                         if request.skip_reading_prefix_cache:
                             ext_tokens, load_kv_async = 0, False
 
@@ -1159,6 +1170,7 @@ class Scheduler(SchedulerInterface):
                         + self._spec_decode_step_blocks()
                     )
 
+                _t_alloc = _time_mod.perf_counter()
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -1172,6 +1184,7 @@ class Scheduler(SchedulerInterface):
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
                 )
+                _step_allocate_slots_time += _time_mod.perf_counter() - _t_alloc
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -1251,6 +1264,7 @@ class Scheduler(SchedulerInterface):
                     )
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
+                    _num_scheduled_new_reqs += 1
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
@@ -1407,6 +1421,17 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs
             )
 
+        _schedule_total_time = time.monotonic() - scheduled_timestamp
+        _num_total_scheduled_reqs = (
+            len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
+        )
+        _schedule_overhead_time = (
+            _schedule_total_time
+            - _step_hash_time
+            - _step_external_lookup_time
+            - _step_allocate_slots_time
+        )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1429,6 +1454,13 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            # TTFT breakdown: schedule sub-timings.
+            schedule_hash_time=_step_hash_time,
+            schedule_external_lookup_time=_step_external_lookup_time,
+            schedule_allocate_slots_time=_step_allocate_slots_time,
+            schedule_overhead_time=_schedule_overhead_time,
+            num_scheduled_new_reqs=_num_scheduled_new_reqs,
+            num_total_scheduled_reqs=_num_total_scheduled_reqs,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

@@ -304,6 +304,14 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # TTFT breakdown: schedule sub-timings (seconds).
+    schedule_hash_time: float = 0.0
+    schedule_external_lookup_time: float = 0.0
+    schedule_allocate_slots_time: float = 0.0
+    schedule_overhead_time: float = 0.0
+    num_scheduled_new_reqs: int = 0
+    num_total_scheduled_reqs: int = 0
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

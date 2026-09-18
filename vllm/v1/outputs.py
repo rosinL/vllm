@@ -291,6 +291,11 @@ class KVConnectorOutput:
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
 
+    # TTFT breakdown timing (seconds), collected on Worker side.
+    worker_load_kv_time: float = 0.0
+    worker_forward_time: float = 0.0
+    worker_save_kv_time: float = 0.0
+
     def is_empty(self):
         return (
             not self.finished_sending
@@ -374,6 +379,11 @@ class ModelRunnerOutput:
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
+
+    # TTFT breakdown timing (seconds), collected on Worker side.
+    worker_load_kv_time: float = 0.0
+    worker_forward_time: float = 0.0
+    worker_save_kv_time: float = 0.0
 
     @staticmethod
     def with_kv_conn_output_only(

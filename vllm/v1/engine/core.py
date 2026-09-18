@@ -655,9 +655,44 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        _t_update_start = time.perf_counter()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        _update_time = time.perf_counter() - _t_update_start
+
+        # Attach TTFT breakdown timings to each EngineCoreOutput.
+        _num_total = scheduler_output.num_total_scheduled_reqs
+        _update_per_req = _update_time / _num_total if _num_total > 0 else 0.0
+        _overhead_per_new = (
+            scheduler_output.schedule_overhead_time / scheduler_output.num_scheduled_new_reqs
+            if scheduler_output.num_scheduled_new_reqs > 0
+            else 0.0
+        )
+        _worker_load = 0.0
+        _worker_forward = 0.0
+        _worker_save = 0.0
+        _kv_out = (
+            model_output.kv_connector_output
+            if model_output is not None and model_output.kv_connector_output is not None
+            else None
+        )
+        if _kv_out is not None:
+            _worker_load = _kv_out.worker_load_kv_time
+            _worker_forward = _kv_out.worker_forward_time
+            _worker_save = _kv_out.worker_save_kv_time
+
+        for _outputs in engine_core_outputs.values() if engine_core_outputs else []:
+            for _eco in _outputs:
+                _eco.hash_and_local_cache_time = scheduler_output.schedule_hash_time
+                _eco.external_lookup_time = scheduler_output.schedule_external_lookup_time
+                _eco.allocate_slots_time = scheduler_output.schedule_allocate_slots_time
+                _eco.schedule_overhead_time = _overhead_per_new
+                _eco.load_kv_time = _worker_load
+                _eco.forward_time = _worker_forward
+                _eco.save_kv_time = _worker_save
+                _eco.update_time = _update_per_req
+
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
