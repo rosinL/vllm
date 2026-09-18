@@ -219,6 +219,16 @@ class RequestStateStats:
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
 
+    # TTFT breakdown: accumulated timing across steps (seconds).
+    total_hash_and_local_cache_time: float = 0.0
+    total_external_lookup_time: float = 0.0
+    total_allocate_slots_time: float = 0.0
+    total_schedule_overhead_time: float = 0.0
+    total_load_kv_time: float = 0.0
+    total_forward_time: float = 0.0
+    total_save_kv_time: float = 0.0
+    total_update_time: float = 0.0
+
 
 @dataclass
 class FinishedRequestStats:
@@ -237,6 +247,16 @@ class FinishedRequestStats:
     mean_time_per_output_token: float = 0.0
     is_corrupted: bool = False
     num_cached_tokens: int = 0
+
+    # TTFT breakdown (seconds).
+    hash_and_local_cache_time: float = 0.0
+    external_lookup_time: float = 0.0
+    allocate_slots_time: float = 0.0
+    schedule_overhead_time: float = 0.0
+    load_kv_time: float = 0.0
+    forward_time: float = 0.0
+    save_kv_time: float = 0.0
+    update_time: float = 0.0
 
 
 @dataclass
@@ -401,6 +421,31 @@ class IterationStats:
 
         req_stats.last_token_ts = engine_core_timestamp
 
+        # TTFT breakdown: the 7 fields on EngineCoreOutput already carry
+        # per-request accumulated totals (frozen after prefill) computed in
+        # Scheduler.update_from_output, so take the latest value instead of
+        # summing (summing would double-count across decode outputs).
+        # update_time stays per-step and is summed.
+        req_stats.total_hash_and_local_cache_time = output.hash_and_local_cache_time
+        req_stats.total_external_lookup_time = output.external_lookup_time
+        req_stats.total_allocate_slots_time = output.allocate_slots_time
+        req_stats.total_schedule_overhead_time = output.schedule_overhead_time
+        req_stats.total_load_kv_time = output.load_kv_time
+        req_stats.total_forward_time = output.forward_time
+        req_stats.total_save_kv_time = output.save_kv_time
+        req_stats.total_update_time += output.update_time
+
+        import logging
+        logging.getLogger(__name__).info(
+            "[TTFT_DEBUG][Stats] req=%s is_prefilling=%s "
+            "step_fwd=%.6f step_save=%.6f step_load=%.6f "
+            "cum_fwd=%.6f cum_save=%.6f cum_load=%.6f",
+            output.request_id, is_prefilling,
+            output.forward_time, output.save_kv_time, output.load_kv_time,
+            req_stats.total_forward_time, req_stats.total_save_kv_time,
+            req_stats.total_load_kv_time,
+        )
+
     def update_from_events(
         self,
         req_id: str,
@@ -472,6 +517,15 @@ class IterationStats:
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
+            # TTFT breakdown.
+            hash_and_local_cache_time=req_stats.total_hash_and_local_cache_time,
+            external_lookup_time=req_stats.total_external_lookup_time,
+            allocate_slots_time=req_stats.total_allocate_slots_time,
+            schedule_overhead_time=req_stats.total_schedule_overhead_time,
+            load_kv_time=req_stats.total_load_kv_time,
+            forward_time=req_stats.total_forward_time,
+            save_kv_time=req_stats.total_save_kv_time,
+            update_time=req_stats.total_update_time,
         )
         self.finished_requests.append(finished_req)
 

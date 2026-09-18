@@ -907,6 +907,91 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_prefill_time_request, per_engine_labelvalues
         )
 
+        # --- TTFT Breakdown Histograms ---
+        ttft_breakdown_buckets = [
+            0.0001, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0,
+        ]
+
+        histogram_ttft_hash = self._histogram_cls(
+            name="vllm:ttft_hash_and_local_cache_time_seconds",
+            documentation="Time spent on hash and local prefix cache lookup per request.",
+            buckets=ttft_breakdown_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_ttft_hash = create_metric_per_engine(
+            histogram_ttft_hash, per_engine_labelvalues
+        )
+
+        histogram_ttft_external_lookup = self._histogram_cls(
+            name="vllm:ttft_external_lookup_time_seconds",
+            documentation="Time spent on external KV connector lookup per request.",
+            buckets=ttft_breakdown_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_ttft_external_lookup = create_metric_per_engine(
+            histogram_ttft_external_lookup, per_engine_labelvalues
+        )
+
+        histogram_ttft_allocate_slots = self._histogram_cls(
+            name="vllm:ttft_allocate_slots_time_seconds",
+            documentation="Time spent on KV cache block allocation per request.",
+            buckets=ttft_breakdown_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_ttft_allocate_slots = create_metric_per_engine(
+            histogram_ttft_allocate_slots, per_engine_labelvalues
+        )
+
+        histogram_ttft_schedule_overhead = self._histogram_cls(
+            name="vllm:ttft_schedule_overhead_time_seconds",
+            documentation="Schedule overhead time per request (running dispatch, build_meta, etc.).",
+            buckets=ttft_breakdown_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_ttft_schedule_overhead = create_metric_per_engine(
+            histogram_ttft_schedule_overhead, per_engine_labelvalues
+        )
+
+        histogram_ttft_load_kv = self._histogram_cls(
+            name="vllm:ttft_load_kv_time_seconds",
+            documentation="Time spent loading KV cache from external sources per request.",
+            buckets=ttft_breakdown_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_ttft_load_kv = create_metric_per_engine(
+            histogram_ttft_load_kv, per_engine_labelvalues
+        )
+
+        histogram_ttft_forward = self._histogram_cls(
+            name="vllm:ttft_forward_time_seconds",
+            documentation="Time spent in model.forward() per request.",
+            buckets=ttft_breakdown_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_ttft_forward = create_metric_per_engine(
+            histogram_ttft_forward, per_engine_labelvalues
+        )
+
+        histogram_ttft_save_kv = self._histogram_cls(
+            name="vllm:ttft_save_kv_time_seconds",
+            documentation="Time spent saving KV cache to external pool per request.",
+            buckets=ttft_breakdown_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_ttft_save_kv = create_metric_per_engine(
+            histogram_ttft_save_kv, per_engine_labelvalues
+        )
+
+        histogram_ttft_update = self._histogram_cls(
+            name="vllm:ttft_update_time_seconds",
+            documentation="Time spent in update_from_output() per request.",
+            buckets=ttft_breakdown_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_ttft_update = create_metric_per_engine(
+            histogram_ttft_update, per_engine_labelvalues
+        )
+
         histogram_decode_time_request = self._histogram_cls(
             name="vllm:request_decode_time_seconds",
             documentation="Histogram of time spent in DECODE phase for request.",
@@ -1215,6 +1300,45 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param
                 )
+            # TTFT breakdown.
+            self.histogram_ttft_hash[engine_idx].observe(
+                finished_request.hash_and_local_cache_time
+            )
+            self.histogram_ttft_external_lookup[engine_idx].observe(
+                finished_request.external_lookup_time
+            )
+            self.histogram_ttft_allocate_slots[engine_idx].observe(
+                finished_request.allocate_slots_time
+            )
+            self.histogram_ttft_schedule_overhead[engine_idx].observe(
+                finished_request.schedule_overhead_time
+            )
+            self.histogram_ttft_load_kv[engine_idx].observe(
+                finished_request.load_kv_time
+            )
+            self.histogram_ttft_forward[engine_idx].observe(
+                finished_request.forward_time
+            )
+            self.histogram_ttft_save_kv[engine_idx].observe(
+                finished_request.save_kv_time
+            )
+            self.histogram_ttft_update[engine_idx].observe(
+                finished_request.update_time
+            )
+            logger.info(
+                "[TTFT_DEBUG][Prometheus] req=%s "
+                "hash=%.6f ext=%.6f alloc=%.6f overhead=%.6f "
+                "load=%.6f forward=%.6f save=%.6f update=%.6f",
+                finished_request.request_id,
+                finished_request.hash_and_local_cache_time,
+                finished_request.external_lookup_time,
+                finished_request.allocate_slots_time,
+                finished_request.schedule_overhead_time,
+                finished_request.load_kv_time,
+                finished_request.forward_time,
+                finished_request.save_kv_time,
+                finished_request.update_time,
+            )
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1

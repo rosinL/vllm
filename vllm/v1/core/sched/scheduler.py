@@ -371,6 +371,13 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        import time as _time_mod
+        _step_hash_time = 0.0
+        _step_external_lookup_time = 0.0
+        _step_allocate_slots_time = 0.0
+        _num_scheduled_new_reqs = 0
+        _num_total_scheduled_reqs = 0
+
         self.kv_cache_manager.new_step_starts()
 
         # First, schedule the RUNNING requests.
@@ -459,11 +466,13 @@ class Scheduler(SchedulerInterface):
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
+                    _t_alloc = _time_mod.perf_counter()
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
                     )
+                    _step_allocate_slots_time += _time_mod.perf_counter() - _t_alloc
 
                     if new_blocks is not None:
                         # The request can be scheduled.
@@ -607,18 +616,22 @@ class Scheduler(SchedulerInterface):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    _t_hash = _time_mod.perf_counter()
                     # Get locally-cached tokens.
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
+                    _step_hash_time += _time_mod.perf_counter() - _t_hash
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
+                        _t_ext = _time_mod.perf_counter()
                         ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens
                             )
                         )
+                        _step_external_lookup_time += _time_mod.perf_counter() - _t_ext
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
@@ -758,6 +771,7 @@ class Scheduler(SchedulerInterface):
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
 
+                _t_alloc = _time_mod.perf_counter()
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -770,6 +784,7 @@ class Scheduler(SchedulerInterface):
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                 )
+                _step_allocate_slots_time += _time_mod.perf_counter() - _t_alloc
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -830,6 +845,7 @@ class Scheduler(SchedulerInterface):
                     )
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
+                    _num_scheduled_new_reqs += 1
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
@@ -929,6 +945,17 @@ class Scheduler(SchedulerInterface):
             else None
         )
 
+        _schedule_total_time = time.monotonic() - scheduled_timestamp
+        _num_total_scheduled_reqs = (
+            len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
+        )
+        _schedule_overhead_time = (
+            _schedule_total_time
+            - _step_hash_time
+            - _step_external_lookup_time
+            - _step_allocate_slots_time
+        )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -945,6 +972,13 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            # TTFT breakdown: schedule sub-timings.
+            schedule_hash_time=_step_hash_time,
+            schedule_external_lookup_time=_step_external_lookup_time,
+            schedule_allocate_slots_time=_step_allocate_slots_time,
+            schedule_overhead_time=_schedule_overhead_time,
+            num_scheduled_new_reqs=_num_scheduled_new_reqs,
+            num_total_scheduled_reqs=_num_total_scheduled_reqs,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1390,6 +1424,23 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+        # TTFT breakdown: step-level timings, attributed to every scheduled
+        # request and accumulated per-request while it is still prefilling.
+        _step_hash = scheduler_output.schedule_hash_time
+        _step_ext = scheduler_output.schedule_external_lookup_time
+        _step_alloc = scheduler_output.schedule_allocate_slots_time
+        _step_overhead = scheduler_output.schedule_overhead_time
+        _step_load = model_runner_output.worker_load_kv_time
+        _step_forward = model_runner_output.worker_forward_time
+        _step_save = model_runner_output.worker_save_kv_time
+        if (
+            _step_forward == 0.0
+            and model_runner_output.kv_connector_output is not None
+        ):
+            _kv = model_runner_output.kv_connector_output
+            _step_load = _kv.worker_load_kv_time
+            _step_forward = _kv.worker_forward_time
+            _step_save = _kv.worker_save_kv_time
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
@@ -1405,6 +1456,18 @@ class Scheduler(SchedulerInterface):
                 # be set to None (in order to finish async KV transfer).
                 # In this case, we use is_finished() to check.
                 continue
+
+            # TTFT breakdown: accumulate step timings while the request is
+            # still prefilling (before its first output token), so chunked
+            # prefill totals are captured on the final chunk's output.
+            if not request.output_token_ids:
+                request.ttft_hash_and_local_cache_time += _step_hash
+                request.ttft_external_lookup_time += _step_ext
+                request.ttft_allocate_slots_time += _step_alloc
+                request.ttft_schedule_overhead_time += _step_overhead
+                request.ttft_load_kv_time += _step_load
+                request.ttft_forward_time += _step_forward
+                request.ttft_save_kv_time += _step_save
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = (
@@ -1565,6 +1628,14 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        # TTFT breakdown: per-request accumulated totals.
+                        hash_and_local_cache_time=request.ttft_hash_and_local_cache_time,
+                        external_lookup_time=request.ttft_external_lookup_time,
+                        allocate_slots_time=request.ttft_allocate_slots_time,
+                        schedule_overhead_time=request.ttft_schedule_overhead_time,
+                        load_kv_time=request.ttft_load_kv_time,
+                        forward_time=request.ttft_forward_time,
+                        save_kv_time=request.ttft_save_kv_time,
                     )
                 )
             else:

@@ -195,6 +195,20 @@ class EngineCoreOutput(
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
 
+    # TTFT breakdown: per-request timing (seconds).
+    # Schedule sub-timings are per-request (only set for the step where
+    # the request was first scheduled or had cache lookup).
+    hash_and_local_cache_time: float = 0.0
+    external_lookup_time: float = 0.0
+    allocate_slots_time: float = 0.0
+    schedule_overhead_time: float = 0.0
+    # Worker-side timings from KVConnectorOutput (set for every step).
+    load_kv_time: float = 0.0
+    forward_time: float = 0.0
+    save_kv_time: float = 0.0
+    # EngineCore update_from_output time (per-step, divided by num_total_scheduled_reqs).
+    update_time: float = 0.0
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

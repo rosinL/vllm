@@ -210,6 +210,11 @@ class KVConnectorOutput:
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
 
+    # TTFT breakdown timing (seconds), collected on Worker side.
+    worker_load_kv_time: float = 0.0
+    worker_forward_time: float = 0.0
+    worker_save_kv_time: float = 0.0
+
     def is_empty(self):
         return (
             not self.finished_sending
@@ -280,6 +285,11 @@ class ModelRunnerOutput:
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
 
+    # TTFT breakdown timing (seconds), collected on Worker side.
+    worker_load_kv_time: float = 0.0
+    worker_forward_time: float = 0.0
+    worker_save_kv_time: float = 0.0
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,
@@ -291,6 +301,11 @@ class ModelRunnerOutput:
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
+        # TTFT breakdown: copy timing to top-level fields so they survive
+        # Worker→EngineCore serialization.
+        output.worker_load_kv_time = kv_connector_output.worker_load_kv_time
+        output.worker_forward_time = kv_connector_output.worker_forward_time
+        output.worker_save_kv_time = kv_connector_output.worker_save_kv_time
         return output
 
 

@@ -157,6 +157,9 @@ class KVOutputAggregator:
         output = outputs[output_rank]
 
         assert output is not None
+        # TTFT breakdown: carry over the timing fields from the original
+        # KVConnectorOutput before replacing it with the aggregated one.
+        orig_kv_output = output.kv_connector_output
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
@@ -165,6 +168,15 @@ class KVOutputAggregator:
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
             expected_finished_count=self._expected_finished_count,
+            worker_load_kv_time=(
+                orig_kv_output.worker_load_kv_time if orig_kv_output else 0.0
+            ),
+            worker_forward_time=(
+                orig_kv_output.worker_forward_time if orig_kv_output else 0.0
+            ),
+            worker_save_kv_time=(
+                orig_kv_output.worker_save_kv_time if orig_kv_output else 0.0
+            ),
         )
 
         return output
