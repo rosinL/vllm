@@ -101,6 +101,9 @@ class Scheduler(SchedulerInterface):
         self.spec_decode_metrics_level = (
             self.observability_config.per_request_spec_decode_metrics
         )
+        self.per_request_ttft_breakdown = (
+            self.observability_config.per_request_ttft_breakdown
+        )
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
         if self.observability_config.kv_cache_metrics:
             self.kv_metrics_collector = KVCacheMetricsCollector(
@@ -917,12 +920,17 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
+                    _hash_start = time.monotonic()
                     (
                         new_computed_blocks,
                         num_new_local_computed_tokens,
                         request.shared_prefix_boundary,
                         hit_diverged,
                     ) = self._get_local_prefix_cache_hit(request)
+                    if request.phase_timings is not None:
+                        request.record_phase(
+                            "hash", time.monotonic() - _hash_start
+                        )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -933,16 +941,25 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
+                        _lookup_start = time.monotonic()
                         ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, block_aligned_local
                             )
                         )
+                        if request.phase_timings is not None:
+                            request.record_phase(
+                                "lookup", time.monotonic() - _lookup_start
+                            )
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
+                            if request.phase_timings is not None:
+                                request.phase_timings["sched_retries"] = (
+                                    request.phase_timings.get("sched_retries", 0) + 1
+                                )
                             request_queue.pop_request()
                             step_skipped_waiting.prepend_request(request)
                             continue
@@ -1156,6 +1173,7 @@ class Scheduler(SchedulerInterface):
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
 
+                _alloc_start = time.monotonic()
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -1169,6 +1187,10 @@ class Scheduler(SchedulerInterface):
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
                 )
+                if request.phase_timings is not None:
+                    request.record_phase(
+                        "alloc_slot", time.monotonic() - _alloc_start
+                    )
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -1210,6 +1232,7 @@ class Scheduler(SchedulerInterface):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    request.load_kv_start_ts = time.monotonic()
                     step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
@@ -1886,6 +1909,26 @@ class Scheduler(SchedulerInterface):
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
+        # Per-request TTFT phase breakdown: attribute this step's batch-level
+        # forward / wait_for_save durations to every not-yet-frozen request
+        # scheduled in this step (one chunk entry per step). Chunk recording
+        # freezes at the request's first output token (see the loop below).
+        if self.per_request_ttft_breakdown and num_scheduled_tokens:
+            _forward_dur = (
+                kv_connector_output.forward_duration
+                if kv_connector_output is not None
+                else None
+            )
+            _wait_save_dur = (
+                kv_connector_output.wait_for_save_duration
+                if kv_connector_output is not None
+                else None
+            )
+            for _req_id in num_scheduled_tokens:
+                _req = self.requests.get(_req_id)
+                if _req is not None:
+                    _req.record_chunk_durations(_forward_dur, _wait_save_dur)
+
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
         if self.defer_block_free and scheduler_output.total_num_scheduled_tokens > 0:
@@ -1973,6 +2016,11 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
+
+            # First output token: freeze chunk recording and attach this
+            # step's sampling duration to the request's TTFT breakdown.
+            if generated_token_ids:
+                request.freeze_ttft_phases(model_runner_output.sampling_duration)
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
@@ -2113,6 +2161,12 @@ class Scheduler(SchedulerInterface):
                     prefill_stats.finalize(
                         self.kv_cache_manager.estimate_cached_tokens(request)
                     )
+                # TTFT phase breakdown rides on the first emitted output.
+                phase_timings = (
+                    request.take_phase_timings()
+                    if self.per_request_ttft_breakdown
+                    else None
+                )
 
             finish_reason = None
             if stopped:
@@ -2162,6 +2216,7 @@ class Scheduler(SchedulerInterface):
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         prefill_stats=prefill_stats,
+                        phase_timings=phase_timings,
                         spec_decode_metrics=(
                             request.spec_decode_metrics
                             if finish_reason is not None
@@ -2486,6 +2541,8 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            if self.per_request_ttft_breakdown:
+                request.phase_timings = {}
             if self.spec_decode_metrics_level != "none":
                 request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
                     self.num_spec_tokens
@@ -2925,6 +2982,12 @@ class Scheduler(SchedulerInterface):
         WAITING_FOR_REMOTE_KV.
         """
         assert self.connector is not None
+
+        if request.phase_timings is not None and request.load_kv_start_ts:
+            request.record_phase(
+                "load_kv", time.monotonic() - request.load_kv_start_ts
+            )
+            request.load_kv_start_ts = None
 
         if request.request_id in self.failed_recving_kv_req_ids:
             # Request had KV load failures; num_computed_tokens was already
