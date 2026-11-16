@@ -129,6 +129,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
         request: CompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
+        # Request-resolution phase start (API-process), used by the
+        # per-request TTFT phase breakdown.
+        _req_resolve_start = time.perf_counter()
         if request.stream and request.use_beam_search:
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"
@@ -211,6 +214,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    frontend_phase_timings={
+                        "req_resolve": time.perf_counter() - _req_resolve_start,
+                    },
                 )
 
             generators.append(generator)

@@ -260,6 +260,9 @@ class OpenAIServingChat(GenerateBaseServing):
         request: ChatCompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
+        # Request-resolution phase start (API-process), used by the
+        # per-request TTFT phase breakdown.
+        _req_resolve_start = time.perf_counter()
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
@@ -382,6 +385,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     }
                     if parser is not None and parser.reasoning_parser is not None
                     else None,
+                    frontend_phase_timings={
+                        "req_resolve": time.perf_counter() - _req_resolve_start,
+                    },
                 )
 
             generators.append(generator)

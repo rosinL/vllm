@@ -153,12 +153,27 @@ class AsyncLLM(EngineClient):
         )
 
         # Converts EngineCoreOutputs --> RequestOutput.
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if kv_transfer_config is None:
+            pd_role = ""
+        elif kv_transfer_config.is_kv_producer and kv_transfer_config.is_kv_consumer:
+            pd_role = "PD"
+        elif kv_transfer_config.is_kv_producer:
+            pd_role = "P"
+        elif kv_transfer_config.is_kv_consumer:
+            pd_role = "D"
+        else:
+            pd_role = ""
         self.output_processor = OutputProcessor(
             renderer.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
             admission_stats=self.admission_stats,
+            per_request_ttft_breakdown=(
+                self.observability_config.per_request_ttft_breakdown
+            ),
+            pd_role=pd_role,
         )
 
         # EngineCore (starts the engine in background process).
@@ -376,6 +391,7 @@ class AsyncLLM(EngineClient):
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        frontend_phase_timings: dict[str, float] | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -434,6 +450,8 @@ class AsyncLLM(EngineClient):
                     "latter will be used, and the former will be ignored."
                 )
         else:
+            _ttft_breakdown = self.observability_config.per_request_ttft_breakdown
+            _tokenize_start = time.perf_counter() if _ttft_breakdown else None
             if isinstance(prompt, dict) and "type" in prompt:
                 # Rendered EngineInput; no blocking preprocessing needed.
                 request = self.input_processor.process_inputs(
@@ -465,6 +483,11 @@ class AsyncLLM(EngineClient):
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
                 )
+            if _tokenize_start is not None:
+                frontend_phase_timings = dict(frontend_phase_timings or {})
+                frontend_phase_timings["tokenizer"] = (
+                    time.perf_counter() - _tokenize_start
+                )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
         if reasoning_ended is not None:
@@ -486,7 +509,7 @@ class AsyncLLM(EngineClient):
         params = request.params
 
         if is_pooling or params.n == 1:
-            await self._add_request(request, prompt_text, None, 0, queue)
+            await self._add_request(request, prompt_text, None, 0, queue, frontend_phase_timings)
             return queue
 
         parent_params = params
@@ -500,7 +523,8 @@ class AsyncLLM(EngineClient):
             child_request.request_id = request_id
             child_request.sampling_params = child_params
             await self._add_request(
-                child_request, prompt_text, parent_request, idx, queue
+                child_request, prompt_text, parent_request, idx, queue,
+                frontend_phase_timings,
             )
         return queue
 
@@ -511,6 +535,7 @@ class AsyncLLM(EngineClient):
         parent_req: ParentRequest | None,
         index: int,
         queue: RequestOutputCollector,
+        frontend_phase_timings: dict[str, float] | None = None,
     ):
         if parent_req is None and not self.output_processor.has_request(
             request.request_id
@@ -521,7 +546,17 @@ class AsyncLLM(EngineClient):
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
+        _ttft_breakdown = self.observability_config.per_request_ttft_breakdown
+        _send_start = time.perf_counter() if _ttft_breakdown else None
         await self.engine_core.add_request_async(request)
+        if _send_start is not None:
+            self.output_processor.record_frontend_phase(
+                request.request_id, "add_request", time.perf_counter() - _send_start
+            )
+            for phase, duration in (frontend_phase_timings or {}).items():
+                self.output_processor.record_frontend_phase(
+                    request.request_id, phase, duration
+                )
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
@@ -653,6 +688,7 @@ class AsyncLLM(EngineClient):
         session_id: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        frontend_phase_timings: dict[str, float] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -695,6 +731,7 @@ class AsyncLLM(EngineClient):
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                frontend_phase_timings=frontend_phase_timings,
             )
 
             # The output_handler task pushes items into the queue.

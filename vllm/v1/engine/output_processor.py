@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -40,6 +41,99 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import SamplingMaskLists
+
+logger = init_logger(__name__)
+
+# Dedicated logger for the per-request TTFT phase breakdown lines, so they
+# can be filtered/routed independently of the engine logs.
+ttft_breakdown_logger = init_logger("vllm.per_request_phases")
+
+
+def _fmt_ms(seconds: float) -> str:
+    return f"{seconds * 1000:.2f} ms"
+
+
+def build_ttft_breakdown_log_line(
+    request_id: str,
+    stats: "RequestStateStats",
+) -> str | None:
+    """Format the one-line TTFT phase breakdown for a finished request.
+
+    Returns None when the TTFT interval is not measurable (e.g., the request
+    was aborted before producing its first token).
+
+    Phase semantics (all durations are wall intervals measured inside a
+    single process; ``ttft`` and ``queue_time`` derive from engine-core
+    monotonic timestamps):
+      * ttft: scheduled_ts -> first_token_ts (same definition as the
+        ``time_to_first_token_ms`` response metric).
+      * req-resolve / tokenizer / add_request: API-process phases before the
+        request reached the engine.
+      * queue_time: queued_ts -> scheduled_ts. For requests with an async KV
+        load this interval also contains the KV load wait and any failed
+        scheduling attempts (lookup retries, see sched_retries).
+      * hash / lookup / alloc_slot: durations of the last (successful)
+        scheduling pass.
+      * load_kv: async KV transfer wait (WAITING_FOR_REMOTE_KVS), which
+        happens before the final scheduling pass and is therefore not part
+        of the ttft sum.
+      * stepN_forward / stepN_wait_for_save: per-step batch-attributed
+        forward and KV-save wait durations, up to and including the step
+        that produced the first token.
+      * sampling: sampler duration of the step that produced the first
+        token.
+      * other: ttft minus the in-window engine phases, clamped at 0;
+        absorbs batching gaps and attribution residue.
+    """
+    if stats.first_token_ts <= 0 or stats.scheduled_ts <= 0:
+        return None
+
+    ttft_s = stats.first_token_ts - stats.scheduled_ts
+    queue_s = (
+        stats.scheduled_ts - stats.queued_ts if stats.queued_ts > 0 else None
+    )
+
+    engine = stats.engine_phase_durations or {}
+    frontend = stats.frontend_phase_durations or {}
+    chunks = stats.engine_chunk_durations or []
+
+    parts: list[str] = [f"req_id={request_id}", f"ttft={_fmt_ms(ttft_s)}"]
+
+    for key, label in (
+        ("req_resolve", "req-resolve"),
+        ("tokenizer", "tokenizer"),
+        ("add_request", "add_request"),
+    ):
+        if key in frontend:
+            parts.append(f"{label}={_fmt_ms(frontend[key])}")
+
+    if queue_s is not None:
+        parts.append(f"queue_time={_fmt_ms(queue_s)}")
+
+    in_window_sum = 0.0
+    for key in ("hash", "lookup", "alloc_slot"):
+        if key in engine:
+            in_window_sum += engine[key]
+            parts.append(f"{key}={_fmt_ms(engine[key])}")
+
+    if "load_kv" in engine:
+        parts.append(f"load_kv={_fmt_ms(engine['load_kv'])}")
+
+    for i, (forward_s, wait_save_s) in enumerate(chunks, start=1):
+        parts.append(f"step{i}_forward={_fmt_ms(forward_s)}")
+        parts.append(f"step{i}_wait_for_save={_fmt_ms(wait_save_s)}")
+        in_window_sum += forward_s + wait_save_s
+
+    if "sampling" in engine:
+        in_window_sum += engine["sampling"]
+        parts.append(f"sampling={_fmt_ms(engine['sampling'])}")
+
+    if (retries := engine.get("sched_retries")) is not None and retries:
+        parts.append(f"sched_retries={int(retries)}")
+
+    other_s = max(0.0, ttft_s - in_window_sum)
+    parts.append(f"other={_fmt_ms(other_s)}")
+    return ", ".join(parts)
 
 if TYPE_CHECKING:
     from vllm.v1.engine.admission_control import SharedAdmissionStats
@@ -459,6 +553,8 @@ class OutputProcessor:
         stream_interval: int = 1,
         tracing_enabled: bool = False,
         admission_stats: "SharedAdmissionStats | None" = None,
+        per_request_ttft_breakdown: bool = False,
+        pd_role: str = "",
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
@@ -469,6 +565,8 @@ class OutputProcessor:
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
         self.admission_stats = admission_stats
+        self.per_request_ttft_breakdown = per_request_ttft_breakdown
+        self.pd_role = pd_role
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -692,6 +790,22 @@ class OutputProcessor:
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
 
+            # Merge the engine-side TTFT phase breakdown (sent once, on the
+            # first output of the request).
+            if engine_core_output.phase_timings is not None and (
+                req_state.stats is not None
+            ):
+                timings = engine_core_output.phase_timings
+                chunks = timings.get("chunks")
+                req_state.stats.engine_chunk_durations = (
+                    [list(chunk) for chunk in chunks] if chunks else []
+                )
+                req_state.stats.engine_phase_durations = {
+                    key: value
+                    for key, value in timings.items()
+                    if key != "chunks"
+                }
+
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
@@ -862,6 +976,19 @@ class OutputProcessor:
             req_state.lora_name,
         )
 
+    def record_frontend_phase(
+        self, request_id: str, phase: str, duration: float
+    ) -> None:
+        """Record an API-process phase duration (req-resolve / tokenizer /
+        add_request) on the request's stats. No-op when the request is gone
+        or stats are disabled."""
+        req_state = self.request_states.get(request_id)
+        if req_state is None or req_state.stats is None:
+            return
+        if req_state.stats.frontend_phase_durations is None:
+            req_state.stats.frontend_phase_durations = {}
+        req_state.stats.frontend_phase_durations[phase] = duration
+
     def _update_stats_from_finished(
         self,
         req_state: RequestState,
@@ -882,6 +1009,21 @@ class OutputProcessor:
             num_cached_tokens=req_state.num_cached_tokens,
         )
         self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
+
+        # Per-request TTFT phase breakdown log line. Only meaningful for
+        # single-generation-stream requests; n>1 children are skipped.
+        if (
+            self.per_request_ttft_breakdown
+            and req_state.parent_req is None
+            and req_state.stats is not None
+            and (line := build_ttft_breakdown_log_line(
+                req_state.external_req_id, req_state.stats
+            ))
+            is not None
+        ):
+            ttft_breakdown_logger.info(
+                "[%s] %s", self.pd_role or "engine", line
+            )
 
         ParentRequest.observe_finished_request(
             req_state.parent_req, iteration_stats, req_state.stats.num_generation_tokens
