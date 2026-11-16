@@ -366,13 +366,20 @@ class Request:
         if self.phase_timings is not None:
             self.phase_timings[phase] = duration
 
-    def record_chunk_durations(self, forward: float | None, wait_save: float | None) -> None:
+    def record_chunk_durations(
+        self, forward: float | None, wait_save: float | None
+    ) -> None:
         """Append per-step [forward_s, wait_for_save_s] once per step
         until the first token freezes recording."""
         if self.phase_timings is None or "ttft_done" in self.phase_timings:
             return
         chunks: list[list[float]] = self.phase_timings.setdefault("chunks", [])
-        chunks.append([forward if forward is not None else 0.0, wait_save if wait_save is not None else 0.0])
+        chunks.append(
+            [
+                forward if forward is not None else 0.0,
+                wait_save if wait_save is not None else 0.0,
+            ]
+        )
 
     def freeze_ttft_phases(self, sampling_duration: float | None) -> None:
         """Freeze chunk recording at the first output token and attach the

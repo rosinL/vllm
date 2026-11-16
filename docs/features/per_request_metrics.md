@@ -134,3 +134,46 @@ returned via `--per-request-spec-decode-metrics`. They share this `metrics`
 object as `metrics.speculative_decoding`, and — like the timing fields — are
 reported only for single-sequence (`n == 1`) requests. See
 [Per-Request Acceptance Metrics](speculative_decoding/acceptance_metrics.md).
+
+## TTFT Phase Breakdown
+
+`--per-request-ttft-breakdown` decomposes each request's TTFT into
+per-phase durations and logs one line per request when it finishes (logger
+`vllm.per_request_phases`), in addition to exposing the same breakdown in
+the response as `metrics.ttft_breakdown` when
+`--enable-per-request-metrics` is also set:
+
+`	ext
+[P] req_id=chatcmpl-abc123,ttft=85.20 ms,req-resolve=1.20 ms,tokenizer=3.40 ms,add_request=0.80 ms,queue_time=12.30 ms,hash=0.90 ms,lookup=2.10 ms,alloc_slot=1.00 ms,load_kv=8.50 ms,step1_forward=30.10 ms,step1_wait_for_save=4.20 ms,step2_forward=15.10 ms,step2_wait_for_save=1.90 ms,sampling=3.50 ms,other=3.40 ms
+[D] req_id=chatcmpl-abc123,ttft=42.00 ms,req-resolve=0.60 ms,add_request=0.50 ms,queue_time=5.10 ms,lookup=1.80 ms,alloc_slot=0.90 ms,load_kv=28.30 ms,step1_forward=4.20 ms,sampling=1.10 ms,other=0.00 ms
+`
+
+The `[P]` / `[D]` prefix is derived from `kv_role` in a
+P/D-disaggregated deployment; the two lines can be joined offline by
+`req_id`.
+
+| Field | Description |
+| --- | --- |
+| `ttft` | `scheduled_ts -> first_token_ts` (same definition as `time_to_first_token_ms`). |
+| `req-resolve` / `tokenizer` / `add_request` | API-process phases before the request reached the engine. |
+| `queue_time` | `queued_ts -> scheduled_ts`. For requests with an async KV load this interval also contains the KV load wait and lookup retries. |
+| `hash` / `lookup` / `alloc_slot` | Durations of the last (successful) scheduling pass: local prefix-cache hash, connector lookup, and KV slot allocation. |
+| `load_kv` | Async KV transfer wait (`WAITING_FOR_REMOTE_KVS`). Happens before the final scheduling pass, so it is not part of the `ttft` sum. |
+| `stepN_forward` / `stepN_wait_for_save` | Per-step forward and KV-save durations (batch-attributed) up to and including the first-token step. |
+| `sampling` | Sampler duration of the step that produced the first token. |
+| `sched_retries` | Number of scheduling attempts where the connector could not yet resolve the matched tokens. |
+| `other` | `ttft` minus the in-window phases, clamped at 0. |
+
+Notes and limitations:
+
+- Requires engine statistics logging; rejected when combined with
+  `--disable-log-stats`.
+- Step-level phases are measured per batch in the worker and attributed to
+  every request scheduled in that step; per-request isolation is therefore
+  approximate under mixed batches.
+- Step phases currently require the V1 model runner and a configured KV
+  connector (the P and D roles of a disaggregated deployment). The V2 model
+  runner reports no step durations.
+- With speculative decoding, `sampling` may reflect a draft-model sampler
+  call, and deferred KV-connector finalization moves `wait_for_save` out
+  of the measured step.

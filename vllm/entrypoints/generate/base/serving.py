@@ -68,7 +68,9 @@ def build_ttft_phase_breakdown(
     chunks = metrics.engine_chunk_durations or []
 
     ttft_s = metrics.first_token_ts - metrics.scheduled_ts
-    in_window_sum = sum(engine.get(k, 0.0) for k in ("hash", "lookup", "alloc_slot", "sampling"))
+    in_window_sum = sum(
+        engine.get(k, 0.0) for k in ("hash", "lookup", "alloc_slot", "sampling")
+    )
     for forward_s, wait_save_s in chunks:
         in_window_sum += forward_s + wait_save_s
 

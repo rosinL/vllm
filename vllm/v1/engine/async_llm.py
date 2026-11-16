@@ -509,7 +509,9 @@ class AsyncLLM(EngineClient):
         params = request.params
 
         if is_pooling or params.n == 1:
-            await self._add_request(request, prompt_text, None, 0, queue, frontend_phase_timings)
+            await self._add_request(
+                request, prompt_text, None, 0, queue, frontend_phase_timings
+            )
             return queue
 
         parent_params = params
