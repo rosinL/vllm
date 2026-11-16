@@ -211,6 +211,20 @@ class Request:
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
+        # Per-request TTFT phase breakdown accumulator (engine-core side).
+        # Assigned a dict by the scheduler when --per-request-ttft-breakdown
+        # is enabled; stays None otherwise (zero overhead).
+        # Layout: phase name -> duration (s); reserved keys:
+        #   "chunks": list[[forward_s, wait_for_save_s], ...] per step
+        #             up to and including the first-token step,
+        #   "ttft_done": marker set when the first token was produced
+        #             (freezes chunk recording),
+        #   "sched_retries": number of failed scheduling attempts.
+        self.phase_timings: dict[str, Any] | None = None
+        # Monotonic timestamp of the async KV load start
+        # (WAITING_FOR_REMOTE_KVS entry); used to compute "load_kv".
+        self.load_kv_start_ts: float | None = None
+
         # Per-request speculative-decoding acceptance accumulator. Populated by
         # the scheduler when --per-request-spec-decode-metrics is set (eagerly on
         # add_request, then observed each verify step); stays None otherwise.
@@ -346,6 +360,44 @@ class Request:
         prefill_stats = self.prefill_stats
         self.prefill_stats = None
         return prefill_stats
+
+    def record_phase(self, phase: str, duration: float) -> None:
+        """Record a scalar engine-core phase duration (seconds)."""
+        if self.phase_timings is not None:
+            self.phase_timings[phase] = duration
+
+    def record_chunk_durations(self, forward: float | None, wait_save: float | None) -> None:
+        """Append per-step [forward_s, wait_for_save_s] once per step
+        until the first token freezes recording."""
+        if self.phase_timings is None or "ttft_done" in self.phase_timings:
+            return
+        chunks: list[list[float]] = self.phase_timings.setdefault("chunks", [])
+        chunks.append([forward if forward is not None else 0.0, wait_save if wait_save is not None else 0.0])
+
+    def freeze_ttft_phases(self, sampling_duration: float | None) -> None:
+        """Freeze chunk recording at the first output token and attach the
+        sampling duration of the step that produced it."""
+        if self.phase_timings is None or "ttft_done" in self.phase_timings:
+            return
+        self.phase_timings["ttft_done"] = True
+        if sampling_duration is not None:
+            self.phase_timings["sampling"] = sampling_duration
+
+    def take_phase_timings(self) -> dict[str, Any] | None:
+        """Return the transportable phase timings snapshot exactly once
+        (on the first emitted output), or None when disabled/already taken.
+
+        Internal markers (ttft_done) are stripped; chunks are converted to
+        plain lists for msgspec transport.
+        """
+        if not self.phase_timings:
+            return None
+        timings = self.phase_timings
+        self.phase_timings = None
+        timings.pop("ttft_done", None)
+        if "chunks" in timings:
+            timings["chunks"] = [list(chunk) for chunk in timings["chunks"]]
+        return timings
 
     def __lt__(self, other: "Request") -> bool:
         """

@@ -236,6 +236,27 @@ class RequestStateStats:
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
 
+    # Per-request TTFT phase breakdown (only populated when
+    # --per-request-ttft-breakdown is enabled).
+    #
+    # Durations are wall intervals measured inside a single process
+    # (frontend or engine core); they are never compared across processes.
+    #
+    # Frontend (API process) phases: req_resolve / tokenizer / add_request.
+    frontend_phase_durations: dict[str, float] | None = None
+
+    # Engine-core phases measured around scheduler state transitions:
+    # hash / lookup / alloc_slot (last scheduling attempt; the wall time
+    # of failed earlier attempts is inside the queue interval and only
+    # surfaces via sched_retries), load_kv (async KV transfer wait),
+    # sampling (step that produced the first token), and the number of
+    # failed scheduling attempts (sched_retries).
+    engine_phase_durations: dict[str, float] | None = None
+
+    # Per prefill/decode chunk [forward_s, wait_for_save_s] measured up to
+    # and including the step that produced the first token.
+    engine_chunk_durations: list[list[float]] | None = None
+
 
 @dataclass
 class FinishedRequestStats:

@@ -465,6 +465,15 @@ def validate_parsed_serve_args(args: argparse.Namespace):
             "logging; remove --disable-log-stats to enable per-request metrics."
         )
 
+    if getattr(args, "per_request_ttft_breakdown", False) and getattr(
+        args, "disable_log_stats", False
+    ):
+        raise ValueError(
+            "Error: --per-request-ttft-breakdown requires engine statistics "
+            "logging; remove --disable-log-stats to enable the TTFT "
+            "breakdown."
+        )
+
     if args.data_parallel_multi_port_external_lb:
         from vllm.entrypoints.launchers.dp_supervisor import (
             validate_multi_port_external_lb_args,

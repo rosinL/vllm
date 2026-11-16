@@ -212,6 +212,10 @@ class EngineCoreOutput(
     events: list[EngineCoreEvent] | None = None
     kv_transfer_params: dict[str, Any] | None = None
     ec_transfer_params: dict[str, Any] | None = None
+    # Per-request TTFT phase breakdown (see Request.take_phase_timings).
+    # Sent exactly once, with the first output of the request, when
+    # --per-request-ttft-breakdown is enabled.
+    phase_timings: dict[str, Any] | None = None
 
     trace_headers: Mapping[str, str] | None = None
 

@@ -680,6 +680,7 @@ class EngineArgs:
         ObservabilityConfig.per_request_spec_decode_metrics
     )
     kv_cache_metrics: bool = ObservabilityConfig.kv_cache_metrics
+    per_request_ttft_breakdown: bool = ObservabilityConfig.per_request_ttft_breakdown
     kv_cache_metrics_sample: float = get_field(
         ObservabilityConfig, "kv_cache_metrics_sample"
     )
@@ -1543,6 +1544,10 @@ class EngineArgs:
             "--kv-cache-metrics", **observability_kwargs["kv_cache_metrics"]
         )
         observability_group.add_argument(
+            "--per-request-ttft-breakdown",
+            **observability_kwargs["per_request_ttft_breakdown"],
+        )
+        observability_group.add_argument(
             "--kv-cache-metrics-sample",
             **observability_kwargs["kv_cache_metrics_sample"],
         )
@@ -2027,6 +2032,7 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
             per_request_spec_decode_metrics=self.per_request_spec_decode_metrics,
             kv_cache_metrics=self.kv_cache_metrics,
+            per_request_ttft_breakdown=self.per_request_ttft_breakdown,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
             cudagraph_metrics=self.cudagraph_metrics,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,

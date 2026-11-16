@@ -62,6 +62,17 @@ class ObservabilityConfig:
     Uses sampling to minimize overhead.
     Requires log stats to be enabled (i.e., --disable-log-stats not set)."""
 
+    per_request_ttft_breakdown: bool = False
+    """Enable per-request TTFT phase breakdown. When enabled, the engine
+    tracks per-request durations for the scheduling (hash/lookup/alloc),
+    KV load, per-chunk forward / KV save, and sampling phases, combines
+    them with frontend phases (request resolution, tokenization,
+    add_request), and logs one summary line per request when it finishes
+    (logger: ``vllm.per_request_phases``). The same breakdown is exposed
+    in the API response ``metrics.ttft_breakdown`` for single-sequence
+    requests when ``--enable-per-request-metrics`` is set. Requires log
+    stats to be enabled (i.e., --disable-log-stats not set)."""
+
     kv_cache_metrics_sample: float = Field(default=0.01, gt=0, le=1)
     """Sampling rate for KV cache metrics (0.0, 1.0]. Default 0.01 = 1% of blocks."""
 
