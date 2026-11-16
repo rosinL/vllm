@@ -291,6 +291,13 @@ class KVConnectorOutput:
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
 
+    # Batch-level phase durations (seconds) for the worker step that produced
+    # this output, used by the per-request TTFT phase breakdown. ``None`` when
+    # no KV connector is configured or the phase did not run.
+    forward_duration: float | None = None
+    wait_for_save_duration: float | None = None
+    start_load_kv_duration: float | None = None
+
     def is_empty(self):
         return (
             not self.finished_sending
@@ -372,6 +379,11 @@ class ModelRunnerOutput:
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
+
+    # Wall duration (seconds) of the sampler forward pass for this step,
+    # used by the per-request TTFT phase breakdown. ``None`` when not
+    # measured (e.g., pooling or spec-decode alternate sampling paths).
+    sampling_duration: float | None = None
 
     @staticmethod
     def with_kv_conn_output_only(

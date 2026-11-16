@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that samples the next tokens from the model's outputs."""
 
+from time import perf_counter
+
 import torch
 import torch.nn as nn
 
@@ -16,6 +18,20 @@ from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
+
+# Wall duration of the most recent Sampler.forward call in this worker
+# process. Read by the model runner when building ModelRunnerOutput to feed
+# the per-request TTFT phase breakdown. The runner is single-threaded, so a
+# plain module-level variable is sufficient.
+_last_sampling_duration: float | None = None
+
+
+def take_last_sampling_duration() -> float | None:
+    """Return and clear the most recent sampler forward duration."""
+    global _last_sampling_duration
+    duration = _last_sampling_duration
+    _last_sampling_duration = None
+    return duration
 
 
 class Sampler(nn.Module):
@@ -77,6 +93,7 @@ class Sampler(nn.Module):
         predict_bonus_token: bool = False,
         logprobs_mode_override: LogprobsMode | None = None,
     ) -> SamplerOutput:
+        _sampling_start = perf_counter()
         logprobs_mode = logprobs_mode_override or self.logprobs_mode
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
@@ -147,6 +164,8 @@ class Sampler(nn.Module):
             sampled_token_ids=sampled.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
         )
+        global _last_sampling_duration
+        _last_sampling_duration = perf_counter() - _sampling_start
         return sampler_output
 
     def gather_specific_token_logprobs(

@@ -6,6 +6,7 @@ Define KV connector functionality mixin for model runners.
 
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from time import perf_counter
 from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
@@ -85,14 +86,24 @@ class KVConnectorModelRunnerMixin:
         # their host-side submission cost off the critical path.
         start_after_forward = not scheduler_output.has_sync_kv_loads
         if not start_after_forward:
+            _load_start = perf_counter()
             kv_connector.start_load_kv(get_forward_context())
+            output.start_load_kv_duration = perf_counter() - _load_start
         try:
+            # Record the forward wall time on normal exit only (skipped
+            # when the body raised), for the per-request TTFT breakdown.
+            _forward_start = perf_counter()
             yield output
+            output.forward_duration = perf_counter() - _forward_start
         finally:
             if start_after_forward:
+                _load_start = perf_counter()
                 kv_connector.start_load_kv(get_forward_context())
+                output.start_load_kv_duration = perf_counter() - _load_start
             if wait_for_save and not defer_finalize:
+                _save_start = perf_counter()
                 kv_connector.wait_for_save()
+                output.wait_for_save_duration = perf_counter() - _save_start
 
             transfer_results = kv_connector.get_transfer_results(
                 scheduler_output.finished_req_ids
