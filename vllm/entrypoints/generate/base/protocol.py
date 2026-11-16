@@ -74,6 +74,36 @@ class SpeculativeDecodingMetrics(OpenAIBaseModel):
     per_step_drafted: list[int] | None = None
 
 
+class TTFTStepBreakdown(OpenAIBaseModel):
+    """Per-step (chunk) durations of the TTFT breakdown."""
+
+    forward_ms: float | None = None
+    wait_for_save_ms: float | None = None
+
+
+class TTFTPhaseBreakdown(OpenAIBaseModel):
+    """Per-request TTFT phase breakdown.
+
+    See ``--per-request-ttft-breakdown`` for the phase definitions. All
+    fields are ``null`` when the corresponding measurement is unavailable;
+    the whole object is ``null`` when the breakdown is disabled or the
+    request cannot be attributed to a single generation stream.
+    """
+
+    req_resolve_ms: float | None = None
+    tokenizer_ms: float | None = None
+    add_request_ms: float | None = None
+    queue_time_ms: float | None = None
+    hash_ms: float | None = None
+    lookup_ms: float | None = None
+    alloc_slot_ms: float | None = None
+    load_kv_ms: float | None = None
+    sampling_ms: float | None = None
+    other_ms: float | None = None
+    sched_retries: int | None = None
+    steps: list[TTFTStepBreakdown] | None = None
+
+
 class PerRequestMetrics(OpenAIBaseModel):
     time_to_first_token_ms: float | None = None
     generation_time_ms: float | None = None
@@ -82,6 +112,8 @@ class PerRequestMetrics(OpenAIBaseModel):
     tokens_per_second: float | None = None
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
+    # Experimental, subject to change. Requires --per-request-ttft-breakdown.
+    ttft_breakdown: TTFTPhaseBreakdown | None = None
 
 
 class RequestResponseMetadata(BaseModel):

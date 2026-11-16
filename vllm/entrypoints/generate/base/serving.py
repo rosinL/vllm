@@ -16,6 +16,8 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     SpeculativeDecodingMetrics,
+    TTFTPhaseBreakdown,
+    TTFTStepBreakdown,
 )
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -45,6 +47,63 @@ RequestT = TypeVar("RequestT", bound=AnyRequest)
 _T = TypeVar("_T")
 SESSION_ID_HEADER = "X-Session-ID"
 PRIORITY_HEADER = "X-Vllm-Priority"
+
+
+def build_ttft_phase_breakdown(
+    metrics: RequestStateStats | None,
+) -> TTFTPhaseBreakdown | None:
+    """Build the TTFT phase breakdown from ``RequestStateStats``.
+
+    Returns None when the stats carry no breakdown data (feature disabled
+    on the engine side or request aborted before its first token).
+    """
+    if metrics is None or metrics.engine_phase_durations is None:
+        return None
+
+    if metrics.first_token_ts <= 0 or metrics.scheduled_ts <= 0:
+        return None
+
+    engine = metrics.engine_phase_durations
+    frontend = metrics.frontend_phase_durations or {}
+    chunks = metrics.engine_chunk_durations or []
+
+    ttft_s = metrics.first_token_ts - metrics.scheduled_ts
+    in_window_sum = sum(engine.get(k, 0.0) for k in ("hash", "lookup", "alloc_slot", "sampling"))
+    for forward_s, wait_save_s in chunks:
+        in_window_sum += forward_s + wait_save_s
+
+    return TTFTPhaseBreakdown(
+        req_resolve_ms=frontend.get("req_resolve", 0.0) * 1000
+        if "req_resolve" in frontend
+        else None,
+        tokenizer_ms=frontend.get("tokenizer", 0.0) * 1000
+        if "tokenizer" in frontend
+        else None,
+        add_request_ms=frontend.get("add_request", 0.0) * 1000
+        if "add_request" in frontend
+        else None,
+        queue_time_ms=(metrics.scheduled_ts - metrics.queued_ts) * 1000
+        if metrics.queued_ts > 0
+        else None,
+        hash_ms=engine.get("hash", 0.0) * 1000 if "hash" in engine else None,
+        lookup_ms=engine.get("lookup", 0.0) * 1000 if "lookup" in engine else None,
+        alloc_slot_ms=engine.get("alloc_slot", 0.0) * 1000
+        if "alloc_slot" in engine
+        else None,
+        load_kv_ms=engine.get("load_kv", 0.0) * 1000 if "load_kv" in engine else None,
+        sampling_ms=engine.get("sampling", 0.0) * 1000
+        if "sampling" in engine
+        else None,
+        other_ms=max(0.0, ttft_s - in_window_sum) * 1000,
+        sched_retries=int(engine["sched_retries"])
+        if engine.get("sched_retries")
+        else None,
+        steps=[
+            TTFTStepBreakdown(forward_ms=f * 1000, wait_for_save_ms=w * 1000)
+            for f, w in chunks
+        ]
+        or None,
+    )
 
 
 def build_per_request_timing_metrics(
@@ -99,6 +158,7 @@ def build_per_request_timing_metrics(
         queue_time_ms=queue_time_ms,
         mean_itl_ms=mean_itl_ms,
         tokens_per_second=tokens_per_second,
+        ttft_breakdown=build_ttft_phase_breakdown(metrics),
     )
 
 
