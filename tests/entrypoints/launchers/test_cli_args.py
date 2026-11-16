@@ -219,6 +219,20 @@ def test_per_request_metrics_requires_log_stats(serve_parser):
         validate_parsed_serve_args(args)
 
 
+def test_per_request_ttft_breakdown_requires_log_stats(serve_parser):
+    args = serve_parser.parse_args(
+        args=["--per-request-ttft-breakdown", "--disable-log-stats"]
+    )
+    with pytest.raises(ValueError):
+        validate_parsed_serve_args(args)
+
+
+def test_per_request_ttft_breakdown_parses(serve_parser):
+    args = serve_parser.parse_args(args=["--per-request-ttft-breakdown"])
+    validate_parsed_serve_args(args)
+    assert args.per_request_ttft_breakdown is True
+
+
 def _build_launch_render_parser():
     """Mirror `vllm launch render`.
 

@@ -133,7 +133,7 @@ def build_ttft_breakdown_log_line(
 
     other_s = max(0.0, ttft_s - in_window_sum)
     parts.append(f"other={_fmt_ms(other_s)}")
-    return ", ".join(parts)
+    return ",".join(parts)
 
 if TYPE_CHECKING:
     from vllm.v1.engine.admission_control import SharedAdmissionStats
